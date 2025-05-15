@@ -1,0 +1,181 @@
+#!/bin/python3
+
+import argparse
+import requests
+import csv
+import re
+import time
+from datetime import datetime
+import usernames as reddit_usernames
+
+
+# Change this to your desired cutoff date (YYYY-MM-DD format)
+CUTOFF_DATE = "2025-05-07"
+CUTOFF_TIMESTAMP = int(datetime.strptime(CUTOFF_DATE, "%Y-%m-%d").timestamp())
+
+
+HEADERS = {'User-Agent': 'reddit_report/1.0'}
+USERNAMES = reddit_usernames 
+LPU_KEYWORDS = ['lpu', 'lovely professional university']
+
+def fetch_json(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+        return None
+    except:
+        return None
+
+def get_user_info(username):
+    url = f'https://www.reddit.com/user/{username}/about.json'
+    data = fetch_json(url)
+    if not data or 'data' not in data:
+        return None
+    d = data['data']
+    return {
+        'username': username,
+        'post_karma': d.get('link_karma', 0),
+        'comment_karma': d.get('comment_karma', 0),
+        'total_karma': d.get('total_karma', 0)
+    }
+
+def get_posts(username):
+    posts = []
+    after = None
+    url = f'https://www.reddit.com/user/{username}/submitted.json'
+    for _ in range(5):  # Limit to 5 pages
+        fetch_url = url + (f'?after={after}' if after else '')
+        data = fetch_json(fetch_url)
+        if not data or 'data' not in data or not data['data'].get('children'):
+            break
+        for post in data['data']['children']:
+            d = post['data']
+            if d.get('created_utc', 0) < CUTOFF_TIMESTAMP:
+                continue  # Skip posts before the cutoff
+            posts.append({
+                'link': f"https://reddit.com{d['permalink']}",
+                'subreddit': d.get('subreddit_name_prefixed', '').replace('r/', ''),
+                'title': d.get('title', ''),
+                'upvotes': d.get('ups', 0),
+                'comments': d.get('num_comments', 0),
+                'created_utc': d.get('created_utc', 0)
+            })
+        after = data['data'].get('after')
+        if not after:
+            break
+        time.sleep(1)
+    return posts
+
+def get_comments(username):
+    comments = []
+    after = None
+    url = f'https://www.reddit.com/user/{username}/comments.json'
+    for _ in range(5):  # Limit to 5 pages
+        fetch_url = url + (f'?after={after}' if after else '')
+        data = fetch_json(fetch_url)
+        if not data or 'data' not in data or not data['data'].get('children'):
+            break
+        for comment in data['data']['children']:
+            d = comment['data']
+            comments.append(f"https://reddit.com{d['permalink']}")
+        after = data['data'].get('after')
+        if not after:
+            break
+        time.sleep(1)  # Avoid rate limits
+    return comments
+
+def print_summary():
+    rows = []
+    for user in USERNAMES:
+        info = get_user_info(user)
+        if info:
+            posts = get_posts(user)
+            comments = get_comments(user)
+            rows.append([
+                user,
+                len(posts),
+                len(comments),
+                info['post_karma'],
+                info['comment_karma'],
+                info['total_karma']
+            ])
+    rows.sort(key=lambda x: x[5])  # Sort by total karma
+    print("\n{:<20} {:<10} {:<12} {:<12} {:<15} {:<12}".format(
+        "Username", "Posts", "Comments", "Post Karma", "Comment Karma", "Total Karma"))
+    print("-" * 85)
+    for row in rows:
+        print("{:<20} {:<10} {:<12} {:<12} {:<15} {:<12}".format(*row))
+
+def print_posts(username):
+    posts = get_posts(username)
+    print(f"\nPosts by {username}:")
+    for post in posts:
+        print(post['link'])
+
+def print_comments(username):
+    comments = get_comments(username)
+    print(f"\nComments by {username}:")
+    for comment in comments:
+        print(comment)
+
+def write_report(usernames, filename='reddit_report.csv'):
+    with open(filename, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f, delimiter='\t')
+        writer.writerow([
+            'name', 'user_name', 'account_link', 'subreddit', 'post_link',
+            'related_to_lpu', 'views', 'post_upvotes', 'post_comments',
+            'total_post_karma', 'total_comment_karma', 'total_gross_karma'
+        ])
+        for user in usernames:
+            info = get_user_info(user)
+            if not info:
+                continue
+            posts = get_posts(user)
+            comments = get_comments(user)
+            post_karma = info['post_karma']
+            comment_karma = info['comment_karma']
+            for post in posts:
+                related = 'Yes' if any(kw in post['title'].lower() for kw in LPU_KEYWORDS) else 'No'
+                writer.writerow([
+                    user,
+                    user,
+                    f'https://www.reddit.com/user/{user}/',
+                    post['subreddit'],
+                    post['link'],
+                    related,
+                    '',  # Views not available via JSON
+                    post['upvotes'],
+                    post['comments'],
+                    post_karma,
+                    comment_karma,
+                    post_karma + comment_karma
+                ])
+    print(f"\nReport saved to {filename}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Reddit Report Tool")
+    parser.add_argument('-s', action='store_true', help='Show summary of all accounts')
+    parser.add_argument('-p', metavar='USERNAME', help='List post links for a user')
+    parser.add_argument('-c', metavar='USERNAME', help='List comment links for a user')
+    parser.add_argument('-pc', metavar='USERNAME', help='List post and comment links')
+    parser.add_argument('--report', nargs='*', help='Generate CSV report for given users or all if none')
+    args = parser.parse_args()
+
+    if args.s:
+        print_summary()
+    elif args.p:
+        print_posts(args.p)
+    elif args.c:
+        print_comments(args.c)
+    elif args.pc:
+        print_posts(args.pc)
+        print_comments(args.pc)
+    elif args.report is not None:
+        users = args.report if args.report else USERNAMES
+        write_report(users)
+    else:
+        parser.print_help()
+
+if __name__ == '__main__':
+    main()
